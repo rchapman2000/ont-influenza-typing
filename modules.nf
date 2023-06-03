@@ -265,7 +265,18 @@ process Select_References_For_Assembly {
 
     python3 ${baseDir}/scripts/select_flu_segment_references.py --alignmentStats ${base}-classification-stats.tab --referenceDB ${baseDir}/data/insaFlu.fasta --outPref ${base} ${minReadParam}
 
-    refs_used=\$(bioawk -c fastx '{printf \$name " "}' ${base}-references.fasta)
+    if [[ -s ${base}-references.fasta ]]; then
+
+        refs_used=\$(bioawk -c fastx '{printf \$name " "}' ${base}-references.fasta)
+
+    else
+
+        refs_used=""
+        cat ${baseDir}/data/insaFlu.fasta > ${base}-references.fasta
+
+    fi
+
+    
 
     summary="${existingSummary},\$refs_used"
     """
