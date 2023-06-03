@@ -10,7 +10,7 @@ process Setup {
         // The provided medaka model
         val model
         // The batch size option supplied to medaka
-        val minOverlapLen
+        val minReadsToAssemble
         // The header to write to the summary file.
         val summaryHeader
         // The output directory to be used.
@@ -56,7 +56,7 @@ process Setup {
     echo "Porechop Adapter Trimming: ${trimming}" >> analysis-parameters.txt
     echo "Minimum Read Length Cutoff : ${minReadLen}" >> analysis-parameters.txt
     echo "Maxmimum Read Length Cutoff : ${maxReadLen}" >> analysis-parameters.txt
-    echo "Minimum Read Overlap Length for Assembly : ${minOverlapLen} bp" >> analysis-parameters.txt
+    echo "Selection Criteria for Assembly References : ${minReadsToAssemble} bp" >> analysis-parameters.txt
     echo "Medaka Model : ${model}" >> analysis-parameters.txt
 
     touch stats-summary.csv
@@ -231,113 +231,260 @@ process Length_Filtering {
     //NanoFilt ${minLenParam} ${maxLenParam} ${reads} > ${base}-length-filtered.fastq
 }
 
-
-// Perfroms a De Novo assembly of the ONT reads using
-// Miniasm + Racon
-process Miniasm_Assembly {
-    input: 
+process Select_References_For_Assembly {
+    input:
         tuple val(base), file(reads)
 
-        val minReadLen
-
-        val minOverlapLen
+        val minReadParam
+        
+        val baseDir
 
         val outDir
-
+        
         val existingSummary
 
     output:
+        tuple val(base), file(reads), file("${base}-references.fasta")
 
-        tuple val(base), file(reads), file("${base}-draft-contigs.fasta")
+        file "${base}-reference-alignment-stats.tab"
 
         env summary
 
-    publishDir "${outDir}/${base}-Intermediate-Files/", mode: "copy", pattern: "${base}-draft-contigs.fasta"
-
+    publishDir "${outDir}/${base}-Intermediate-Files/", mode: "copy", pattern: "${base}-references-for-assembly.fasta"
+    publishDir "${outDir}/${base}-Intermediate-Files/", mode: "copy", pattern: "${base}-reference-alignment-stats.tab"
 
     script:
     """
     #!/bin/bash
 
-    minimap2 -x ava-ont ${reads} ${reads} > ${base}-reads-overlap.paf
+    minimap2 -ax map-ont --secondary=no ${baseDir}/data/insaFlu.fasta ${reads} > ${base}-classification.sam
 
-    miniasm -m ${minOverlapLen} -s ${minReadLen} -f ${reads} ${base}-reads-overlap.paf > ${base}-miniasm.gfa
+    samtools view -b ${base}-classification.sam | samtools sort > ${base}-classification.bam
 
-    awk '\$1 ~/S/ {print \">\"\$2\"\\n\"\$3}' ${base}-miniasm.gfa > ${base}-unpolished-draft-contigs.fasta
+    samtools idxstats ${base}-classification.bam | cut -f 1,3 > ${base}-classification-stats.tab
 
-    minimap2 -x map-ont ${base}-unpolished-draft-contigs.fasta ${reads} > ${base}-reads-contigs-overlap.paf
+    python3 ${baseDir}/scripts/select_flu_segment_references.py --alignmentStats ${base}-classification-stats.tab --referenceDB ${baseDir}/data/insaFlu.fasta --outPref ${base} ${minReadParam}
 
-    if [[ -s "${base}-reads-contigs-overlap.paf" ]]; then
-        racon ${reads} ${base}-reads-contigs-overlap.paf ${base}-unpolished-draft-contigs.fasta ${reads} > ${base}-draft-contigs.fasta
-    else
-        mv ${base}-unpolished-draft-contigs.fasta ${base}-draft-contigs.fasta
-    fi
+    refs_used=\$(bioawk -c fastx '{printf \$name " "}' ${base}-references.fasta)
 
-    num_contigs=\$(grep ">" ${base}-draft-contigs.fasta | wc -l)
-
-    avg_contig_len=\$(bioawk -c fastx '{ totalBases += length(\$seq); totalReads++} END{print totalBases/totalReads}' ${base}-draft-contigs.fasta)
-
-    summary="${existingSummary},\$num_contigs,\$avg_contig_len"
+    summary="${existingSummary},\$refs_used"
     """
 }
 
-// Uses Medaka to Polish the contigs.
-process Medaka_Correct {
+process Minimap2_Alignment {
     input:
-        // Tuple contains the sample base name,
-        // the reads used to generate the draft assembly,
-        // and the draft assembly.
-        tuple val(base), file(reads), file(draft)
-        // The name of the output directory to copy
-        // generated output files.
+        tuple val(base), file(reads), file(ref)
+
         val outDir
-        // The number of threads available to
-        // compute using.
-        val threads
-        // The medaka model provided.
-        val model
-        // A string containing previously generated
-        // statistics to be appended to.
+        
         val existingSummary
 
     output:
-        // Tuple contains the sample base name and the
-        // corrected assembly in fasta format.
-        tuple val(base), file("${base}-corrected-assembly.fasta")
-        // A string containing statistics including
-        // those generated during this step.
+        tuple val(base), file(ref), file("${base}-align.bam")
+
         env summary
 
-    publishDir "${outDir}", mode: "copy"
+    publishDir "${outDir}/${base}-Intermediate-Files/", mode: "copy", pattern: "${base}-align.bam"
+
+    script:
+    """
+    #!/bin/bash
+
+    minimap2 -ax map-ont --secondary=no ${ref} ${reads} > align.sam
+
+    samtools view -b align.sam | samtools sort > ${base}-align.bam
+
+    mapped_reads=\$(samtools view -F 0x04 -c ${base}-align.bam)
+
+    average_read_depth=\$(samtools depth -a -J -q 0 -Q 0 ${base}-align.bam | awk -F'\t' 'BEGIN{totalCov=0} {totalCov+=\$3} END{print totalCov/NR}')
+
+    summary="${existingSummary},\$mapped_reads,\$average_read_depth"
+
+    """
+    
+}
+
+process Medaka_Alignment_Polish {
+    input:
+        tuple val(base), file(ref), file(bam)
+
+        val model
+
+        val outDir
+
+        val existingSummary
+
+    output:
+        tuple val(base), file(ref), file(bam), file("${base}-align.hdf")
+
+        env summary
+
+    publishDir "${outDir}/${base}-Intermediate-Files", mode: "copy", pattern: "*.hdf"
+
+    script:
+    """
+    #!/bin/bash
+
+    samtools index ${bam}
+
+    medaka consensus ${bam} --model ${model} ${base}-align.hdf --debug
+
+    summary="${existingSummary}"
+    """
+
+}
+
+process Call_Variants {
+    input:
+        tuple val(base), file(ref), file(bam), file(hdf)
+
+        val minCov
+
+        val outDir
+
+        val existingSummary
+
+    output:
+        tuple val(base), file(ref), file(bam), file("${base}-snps-filtered.vcf"), file("${base}-indels-filtered.vcf")
+
+        env summary
+    
+    publishDir "${outDir}/${base}-Intermediate-Files/", mode: "copy", pattern: "*.vcf"
+
+    script:
+    """
+    #!/bin/bash
+
+    samtools index ${bam}
+
+    medaka variant ${ref} ${hdf} ${base}-medaka.vcf
+
+    bgzip ${base}-medaka.vcf
+    tabix ${base}-medaka.vcf.gz
+
+    longshot -P 0 -A -a 0 --min_mapq 0 --no_haps -v ${base}-medaka.vcf.gz --bam ${bam} --ref ${ref} --out ${base}-longshot.vcf
+
+    vcftools --keep-only-indels --vcf ${base}-longshot.vcf --recode --recode-INFO-all --stdout > ${base}-indels.vcf
+    bgzip ${base}-indels.vcf
+    tabix ${base}-indels.vcf.gz
+
+    vcftools --remove-indels --vcf ${base}-longshot.vcf --recode --recode-INFO-all --stdout > ${base}-snps.vcf
+    bgzip ${base}-snps.vcf
+    tabix ${base}-snps.vcf.gz
+
+    bcftools view -i "((INFO/AC[0] + INFO/AC[1]) >= ${minCov}) && ((INFO/AC[1] / INFO/DP) > (INFO/AC[0] / INFO/DP))" ${base}-indels.vcf.gz > ${base}-indels-filtered.vcf
+    num_indels=\$(grep -v "^#" ${base}-indels-filtered.vcf | wc -l)
+
+    bcftools view -i "((INFO/AC[0] + INFO/AC[1]) >= ${minCov}) && ((INFO/AC[1] / INFO/DP) > (INFO/AC[0] / INFO/DP))" ${base}-snps.vcf.gz > ${base}-snps-filtered.vcf
+    num_snps=\$(grep -v "^#" ${base}-snps-filtered.vcf | wc -l)
+
+    summary="${existingSummary},\$num_snps,\$num_indels"
+    """
+
+}
+
+process Generate_Consensus {
+    input:
+        // Tuple contains the file basename, the alignment bam, the snp vcf file
+        // and the indel vcf file
+        tuple val(base), file(ref), file(bam), file(snps), file(indels)
+        // The name of the base directory
+        val baseDir
+        // The name of the base directory
+        val outDir
+        // The minimum coverage threshold
+        val minCov
+        // The existing summary string.
+        val existingSummary
+
+    output:
+        // Tuple contains the consensus fasta and the sites that were masked in 
+        // a bed file.
+        tuple val(base), file("${base}-consensus.fasta")
+        // The bed file containing the masked sites.
+        file "${base}-mask-sites.bed"
+        // The summary string with the number of masked positions and coverage
+        // added.
+        env summary
+
+    publishDir "${outDir}", mode: 'copy', pattern: "${base}-consensus.fasta"
+    publishDir "${outDir}/${base}-Intermediate-Files", mode: 'copy', pattern: "${base}-mask-sites.bed"
 
     script:
     /*
-    Uses the medaka_consensus pipeline to correct the draft contigs using the raw reads.
+    The script first computes sites to mask by identifying sites that have less than
+    the minimum coverage provided. However, there are formatting issues with the pileup
+    format that make this difficult. Samtools mpileup's output has the depth in 0-based
+    format, which makes it impossible to distinguish between a site with 0 and 1 coverage.
 
-    If the medaka pipeline worked correctly, a file named 'consensus.fasta' will be
-    present in the medaka output directory. If this file exists, then it is moved into
-    a file named "SAMPLE-corrected-assembly.fasta". If not, an empty file is created (to
-    prevent file not found errors).
+    Thus, the pipeline instead makes use of bedtools subtract. It first creates a pileup for only sites with
+    coverage, uses an in-house script to filter sites with less than the minimum coverage
+    and converts these into a bed file.
 
-    Finally, statistics on the number of corrected contigs and average corrected contig length
-    are appended to the string containing existing statistics.
+    Next, the pipeline creates a pileup containing every site, and converts this into a bed file using
+    the in-house script. 
+
+    Finally, the sites we want to keep (those above the minimum coverage threshold) are substracted
+    from the bed file with every site, to give us the low-coverage sites.
+
+    Additionally, there is an interesting case when the sites that fall within a deletion are marked as masked.
+    Because masking is applied first, this will cause an error when applying the variants (as the deletion site will contain 
+    an N character and will not match the VCF reference). Thus, the pipeline uses bcftools to create a bed file for all indel sites,
+    and then subtracts these from the low coverage sites. Now, this results in the sites to mask.
+
+    The bedtools maskfasta command is then used to mask the reference at these positions.
+
+    Then the variants are applied to the mask fasta. The reason this is done after masking is 
+    because the pileup (and therefore masking) positions do not account for indels, which would
+    shift the genomic coordinates (we would end up masking things we did not want to).
+
+    Finally, the fasta is wrapped to make it visually appealing. 
+
+    Old Code:
+    samtools mpileup --no-BAQ -d 100000 -x -A -a -Q 0 -f ${ref} ${bam} > all-sites.pileup
+    python3 ${baseDir}/scripts/pileup_to_bed.py -i all-sites.pileup -o all-sites.bed 
     */
     """
     #!/bin/bash
 
-    medaka_consensus -i ${reads} -d ${draft} -o ${base}-medaka -t ${threads} -m ${model}
+    samtools mpileup --no-BAQ -d 100000 -x -A -Q 0 -f ${ref} ${bam} > ${base}.pileup
+    python3 ${baseDir}/scripts/pileup_to_bed.py -i ${base}.pileup -o passed-sites.bed --minCov ${minCov}
 
-    if [[ -f "${base}-medaka/consensus.fasta" ]]; then
-        mv ${base}-medaka/consensus.fasta ./${base}-corrected-assembly.fasta
+    bioawk -c fastx '{print \$name"\t0\t"length(\$seq)}' ${ref} > all-sites.bed
+
+    if [[ -s all-sites.bed ]]; then
+
+        bedtools subtract -a all-sites.bed -b passed-sites.bed > ${base}-low-cov-sites.bed
+
+        bcftools query -f'%CHROM\t%POS0\t%END\n' ${indels} > indel-sites.bed
+
+        bedtools subtract -a ${base}-low-cov-sites.bed -b indel-sites.bed > ${base}-mask-sites.bed
+
     else
-        touch ./${base}-corrected-assembly.fasta
+        bioawk -c fastx '{print \$name"\t0\t"length(\$seq)}' ${ref} > ${base}-mask-sites.bed
     fi
 
-    num_corrected_contigs=\$(grep ">" ${base}-corrected-assembly.fasta | wc -l)
+    num_mask=\$(bioawk -c bed 'BEGIN{SITES=0} {SITES+=\$end-\$start } END{print SITES}' ${base}-mask-sites.bed)
 
-    avg_corrected_contig_len=\$(bioawk -c fastx '{ totalBases += length(\$seq); totalReads++ } END{ print totalBases/totalReads }' ${base}-corrected-assembly.fasta)
+    bedtools maskfasta -fi ${ref} -bed ${base}-mask-sites.bed -fo masked.fasta
 
-    summary="${existingSummary},\$num_corrected_contigs,\$avg_corrected_contig_len"
+    bgzip ${snps}
+    tabix ${snps}.gz
+
+    bgzip ${indels}
+    tabix ${indels}.gz
+
+    bcftools consensus -f masked.fasta ${snps}.gz > with-snps.fasta
+
+    bcftools consensus -f with-snps.fasta ${indels}.gz > with-indels-snps.fasta
+
+    bioawk -c fastx '{ gsub(/\\n/,"",seq); print ">${base}-"\$name; print \$seq }' with-indels-snps.fasta > ${base}-consensus.fasta
+
+    seq_len=\$(bioawk -c fastx 'BEGIN{bases=0} { bases+=length(\$seq) } END{print bases}' < ${base}-consensus.fasta)
+
+    coverage=\$(python3 ${baseDir}/scripts/calculate_genome_coverage.py -i ${base}-consensus.fasta)
+
+    summary="${existingSummary},\$num_mask,\$coverage"
     """
 }
 
@@ -364,7 +511,7 @@ process Abricate_Typing {
     """
     #!/bin/bash
 
-    abricate --datadir ${baseDir}/data/ -db insaFluDB ${contigs} --quiet 1> ${base}-abricate-report.txt
+    abricate --datadir ${baseDir}/data/ -db insaFluAbricateDB ${contigs} -minid 70 -mincov 60 --quiet 1> ${base}-abricate-report.txt
 
     typing=\$(python3 ${baseDir}/scripts/parse_abricate_results.py -i ${base}-abricate-report.txt)
 

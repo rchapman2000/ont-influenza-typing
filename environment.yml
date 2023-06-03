@@ -24,6 +24,7 @@ dependencies:
   - aws-checksums=0.1.11
   - aws-sdk-cpp=1.8.186
   - bcftools=1.17
+  - bedtools=2.31.0
   - binutils_impl_linux-64=2.40
   - bioawk=1.0
   - biopython=1.81
@@ -147,6 +148,7 @@ dependencies:
   - libxcb=1.15
   - libxml2=2.10.3
   - libzlib=1.2.13
+  - longshot=0.4.5
   - lz4-c=1.9.4
   - mafft=7.520
   - mappy=2.26
@@ -333,6 +335,7 @@ dependencies:
   - tzdata=2023c
   - unzip=6.0
   - urllib3=2.0.2
+  - vcftools=0.1.16
   - viennarna=2.5.1
   - werkzeug=2.3.4
   - wget=1.20.3

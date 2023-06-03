@@ -25,9 +25,9 @@ def helpMessage() {
 
         --maxReadLen INT - If supplied, the pipeline will perform legnth filtering using Chopper excluding reads greater than this size [Default = off] 
 
-        --minOverlapLen INT - The minimum size of read overlaps to be used in Miniasm assembly [Default = 15 bp]
+        --minReadsToAssemble INT - By default, the pipeline will assemble to the HA/NA segments with the most reads aligned to them. Supplying this parameter changes this to assemble reads to any segment with more than the supplied number of reads [Default = OFF].
 
-        --threads INT - The number of CPU threads that can be use to run pipeline tools in parallel
+        --minCov INT - The minimum coverage below which a position will be masked [Default = 10]
 """
 }
 
@@ -50,7 +50,7 @@ def createSummaryHeader (trim, minLenFilt, maxLenFilt) {
         FinalHeader = FinalHeader + "Reads Post Length Filter,Average Filtered Read Length,"
     }
 
-    FinalHeader = FinalHeader + "Draft Contigs,Average Draft Contig Length,Corrected Contigs,Average Corrected Contig Length,Typing"
+    FinalHeader = FinalHeader + "References Assembled To,Reads Aligned,Average Read Depth,SNPs,Indels,Masked Sites,Coverage,Typing"
 
     return FinalHeader
 }
@@ -64,9 +64,10 @@ params.output = false
 params.threads = 1
 params.model = false
 params.trimONTAdapters = false
+params.minReadsToAssemble = false
 params.minReadLen = 200
 params.maxReadLen = 0
-params.minOverlapLen = 15
+params.minCov = 10
 
 include { Setup } from "./modules.nf"
 include { QC_Report } from "./modules.nf"
@@ -74,8 +75,11 @@ include { QC_Report_Filtered } from "./modules.nf"
 include { Collect_Raw_Read_Stats } from "./modules.nf"
 include { Porechop_Trimming } from "./modules.nf"
 include { Length_Filtering } from "./modules.nf"
-include { Miniasm_Assembly } from "./modules.nf"
-include { Medaka_Correct } from "./modules.nf"
+include { Select_References_For_Assembly } from "./modules.nf"
+include { Minimap2_Alignment } from "./modules.nf"
+include { Medaka_Alignment_Polish } from "./modules.nf"
+include { Call_Variants } from "./modules.nf"
+include { Generate_Consensus } from "./modules.nf"
 include { Abricate_Typing } from "./modules.nf"
 include { Write_Summary } from "./modules.nf"
 
@@ -193,13 +197,20 @@ if (params.maxReadLen != 0) {
     maxReadLenParam = "--maxlength ${params.maxReadLen}"
 }
 
+minReadsToAssembleVal = "Assemble to Segments with Highest Number of Reads"
+minReadsToAssembleParam = ""
+if (params.minReadsToAssemble != false) {
+    minReadsToAssembleVal = "Assebmle any segments with more than ${params.minReadsToAssemble} reads aligned"
+    minReadsToAssembleParam = "--minReads ${params.minReadsToAssemble}"
+}
+
 // Generates the summary header based on the parameters supplied. Allows for the header
 // to be dynamic depending on the statistics collected.
 summaryHeader = createSummaryHeader(params.trimONTAdapters, params.minReadLen, params.maxReadLen)
 
 workflow {
 
-Setup( trimmingEnabled, minReadLenVal, maxReadLenVal, model, params.minOverlapLen, summaryHeader, outDir )
+Setup( trimmingEnabled, minReadLenVal, maxReadLenVal, model, minReadsToAssembleVal, summaryHeader, outDir )
 
 QC_Report( inputFiles_ch, outDir )
 
@@ -213,7 +224,7 @@ if (params.trimONTAdapters != false && (params.minReadLen != 0 || params.maxRead
         QC_Report_Filtered( Length_Filtering.out[0], outDir )
 
         // Performs De Novo Assembly of the filtered reads using Miniasm
-        Miniasm_Assembly( Length_Filtering.out[0], params.minReadLen, params.minOverlapLen, outDir, Length_Filtering.out[1])
+        Select_References_For_Assembly( Length_Filtering.out[0], minReadsToAssembleParam, baseDir, outDir, Length_Filtering.out[1] )
 
     }
     else if (params.trimONTAdapters != false && params.minReadLen == 0 && params.maxReadLen == 0) {
@@ -223,7 +234,7 @@ if (params.trimONTAdapters != false && (params.minReadLen != 0 || params.maxRead
         QC_Report_Filtered( Porechop_Trimming.out[0], outDir )
 
        // Performs De Novo Assembly of the trimmed reads using Miniasm
-        Miniasm_Assembly( Porechop_Trimming.out[0], params.minReadLen, params.minOverlapLen, outDir, Porechop_Trimming.out[12])
+       Select_References_For_Assembly( Porechop_Trimming.out[0], minReadsToAssembleParam, baseDir, outDir, Porechop_Trimming.out[2] )
     }
     else if (params.trimONTAdapters == false && (params.minReadLen != 0 || params.maxReadLen != 0)) {
         Length_Filtering( Collect_Raw_Read_Stats.out[0], minReadLenParam, maxReadLenParam, outDir, Collect_Raw_Read_Stats.out[1] )
@@ -231,17 +242,25 @@ if (params.trimONTAdapters != false && (params.minReadLen != 0 || params.maxRead
         QC_Report_Filtered( Length_Filtering.out[0], outDir )
 
         // Performs De Novo Assembly of the filtered reads using Flye
-        Miniasm_Assembly( Length_Filtering.out[0], params.minReadLen, params.minOverlapLen, outDir, Length_Filtering.out[1])
+        Select_References_For_Assembly( Length_Filtering.out[0], minReadsToAssembleParam, baseDir, outDir, Length_Filtering.out[1] )
     }
     else {
         // Performs De Novo Assembly of the reads using Flye
-        Miniasm_Assembly( Collect_Raw_Read_Stats.out[0], params.minReadLen, params.minOverlapLen, outDir, Length_Filtering.out[1])
+        Select_References_For_Assembly( Collect_Raw_Read_Stats.out[0], minReadsToAssembleParam, baseDir, outDir, Collect_Raw_Read_Stats.out[1] )
     }
 
-    // Corrects the assembled contigs using Medaka
-    Medaka_Correct( Miniasm_Assembly.out[0], outDir, params.threads, model, Miniasm_Assembly.out[1] )
+    Minimap2_Alignment( Select_References_For_Assembly.out[0], outDir, Select_References_For_Assembly.out[2] )
 
-    Abricate_Typing( Medaka_Correct.out[0], baseDir, outDir, Medaka_Correct.out[1])
+    Medaka_Alignment_Polish( Minimap2_Alignment.out[0], model, outDir, Minimap2_Alignment.out[1] )
+
+    Call_Variants( Medaka_Alignment_Polish.out[0], params.minCov, outDir, Medaka_Alignment_Polish.out[1] )
+
+    Generate_Consensus( Call_Variants.out[0], baseDir, outDir, params.minCov, Call_Variants.out[1])
+
+    // Corrects the assembled contigs using Medaka
+    //Medaka_Correct( Miniasm_Assembly.out[0], outDir, params.threads, model, Miniasm_Assembly.out[1] )
+
+    Abricate_Typing( Generate_Consensus.out[0], baseDir, outDir, Generate_Consensus.out[2])
 
     Write_Summary( Abricate_Typing.out[1], outDir )
 
