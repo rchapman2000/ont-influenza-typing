@@ -2,6 +2,8 @@
 // be added to later
 process Setup {
     input:
+        val inputType
+        
         val trimming
 
         val minReadLen
@@ -31,32 +33,23 @@ process Setup {
     sample.
 
     The parameters file contains:
-        1. Whether Porechop Trimming was enabled.
-        2. The minimum read length cutoff.
-        3. The maximum read length cutoff (if supplied).
-        4. The minimum read overlap parameter used for Miniasm.
-        4. The medaka model provided.
-
-    The summary file will always contain:
-        1. The sample
-        2. Raw Reads
-        3. Average Raw Read Length
-        4. Trimmed Reads
-        5. Average Trimmed Read Length
-        6. Number of Draft Contigs
-        7. Average Draft Contig Lengths
-        8. Number of Corrected Contigs
-        9. Average Corrected Contig Length
+        1. The input file type.
+        2. Whether Porechop Trimming was enabled.
+        3. The minimum read length cutoff.
+        4. The maximum read length cutoff (if supplied).
+        5. The minimum read overlap parameter used for Miniasm.
+        6. The medaka model provided.
     */
     """
     #!/bin/bash
 
     touch analysis-parameters.txt
 
+    echo "Input Type: ${inputType}" >> analysis-parameters.txt
     echo "Porechop Adapter Trimming: ${trimming}" >> analysis-parameters.txt
     echo "Minimum Read Length Cutoff : ${minReadLen}" >> analysis-parameters.txt
     echo "Maxmimum Read Length Cutoff : ${maxReadLen}" >> analysis-parameters.txt
-    echo "Selection Criteria for Assembly References : ${minReadsToAssemble} bp" >> analysis-parameters.txt
+    echo "Selection Criteria for Assembly References : ${minReadsToAssemble}" >> analysis-parameters.txt
     echo "Medaka Model : ${model}" >> analysis-parameters.txt
 
     touch stats-summary.csv
@@ -136,6 +129,32 @@ process Collect_Raw_Read_Stats {
     avg_raw_read_len=\$(bioawk -c fastx '{ totalBases += length(\$seq); totalReads++} END{print totalBases/totalReads}' ${reads})
 
     summary="${base},\$raw_reads,\$avg_raw_read_len"
+    """
+}
+
+process Collect_FASTA_Stats {
+    input:
+        tuple val(base), file(fasta)
+
+        val baseDir
+    
+    output:
+        tuple val(base), file(fasta)
+
+        env summary
+
+    // The publishDir directive is ignored here because we want the reads
+    // to be an output of this process, but to save space, we do not want
+    // to make a copy of them.
+    script:
+    """
+    #!/bin/bash
+
+    sequences=\$(grep ">" ${fasta} | wc -l) 
+
+    coverage=\$(python3 ${baseDir}/scripts/calculate_genome_coverage.py -i ${fasta})
+
+    summary="${base},\$sequences,\$coverage"
     """
 }
   

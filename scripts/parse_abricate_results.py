@@ -26,16 +26,11 @@ def main():
     if not os.path.exists(args.inFile):
         sys.exit("ERROR: Input File {0} does not exist. Please supply an existing file.".format(args.inFile))
     else:
-        data = pd.read_csv(args.inFile, header=0, sep="\t")
-
-    #print(data)
-    #print(list(data.columns))
+        data = pd.read_csv(args.inFile, header=0, sep="\t", keep_default_na=False, na_values=[""])
 
     TypesDetected = data[data["GENE"] == "M1"]["RESISTANCE"].str.replace("_", " ").unique().tolist()
     HAsDetected = data[data["GENE"] == "HA"]["RESISTANCE"].unique().tolist()
     NAsDetected = data[data["GENE"] == "NA"]["RESISTANCE"].unique().tolist()
-
-
 
     for ha in HAsDetected:
         if (ha in fluAHAs) and ("Influenza A" not in TypesDetected):
